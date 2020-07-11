@@ -1,0 +1,13 @@
+README.rst
+setup.cfg
+setup.py
+src/elora/__init__.py
+src/elora/elora.py
+src/elora.egg-info/PKG-INFO
+src/elora.egg-info/SOURCES.txt
+src/elora.egg-info/dependency_links.txt
+src/elora.egg-info/not-zip-safe
+src/elora.egg-info/requires.txt
+src/elora.egg-info/top_level.txt
+src/elora/test/__init__.py
+src/elora/test/test.py

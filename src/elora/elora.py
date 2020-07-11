@@ -1,3 +1,7 @@
+from operator import add, sub
+import re
+
+import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import norm
 
@@ -12,20 +16,20 @@ class Elora:
     Author: J. Scott Moreland
 
     """
-    def __init__(self, k, scale=1, regress=lambda t: 1, regress_unit='year',
-                 commutes=False):
+    def __init__(self, k, scale=1, commutes=False):
         """
         Args:
             k (float): prefactor multiplying the rating exhanged between a pair
-                of labels in a given comparison
+                of labels for a given comparison
             scale (float): scale factor for the distribution used to model the
-                outcome of the comparison variable; must be greater than 0.
-            regress (float function of float): regression coefficient as a
-                function of elapsed time, expressed in units of `regress_unit`.
-            regress_unit (str): time units of `regress` function input.
+                outcome of the comparison variable; must be greater than 0
+            commutes (bool): true if comparisons commute under label
+                interchange; false otherwise (default is false)
 
         Attributes:
-            initial_time (np.datetime64): time of the first comparison
+            first_update_time (np.datetime64): time of the first comparison
+            last_update_time (np.datetime64): time of the last comparison
+            mean_value (float): mean expected comparison value
             labels (array of string): unique compared entity labels
             examples (ndarray): comparison training examples
             record (dict of ndarray): record of time and rating states
@@ -37,41 +41,44 @@ class Elora:
         if scale <= 0:
             raise ValueError('scale must be a positive real number')
 
-        if not callable(regress):
-            raise ValueError('regress must be univariate scalar function')
-
         self.k = k
         self.scale = scale
-        self.regress = regress
-        self.seconds_per_period = {
-            'year': 3.154e7,
-            'month': 2.628e6,
-            'week': 604800.,
-            'day': 86400.,
-            'hour': 3600.,
-            'minute': 60.,
-            'second': 1.,
-            'millisecond': 1e-3,
-            'microsecond': 1e-6,
-            'nanosecond': 1e-9,
-            'picosecond': 1e-12,
-            'femtosecond': 1e-15,
-            'attosecond': 1e-18,
-        }[regress_unit]
         self.commutes = commutes
-        self.commutator = 1 if commutes else -1
+        self.compare = add if self.commutes else sub
+        self.dtype = [('time', 'datetime64[s]'), ('rating', 'float')]
 
-        self.mean_val = None
-        self.initial_time = None
+        self.first_update_time = None
+        self.last_update_time = None
+        self.mean_value = None
+        self.commutator = None
         self.labels = None
         self.examples = None
         self.record = None
 
-    def add(self, x, y):
-        return x + y
+    def initial_rating(self, time, label):
+        """
+        Customize this function for a given subclass.
 
-    def subtract(self, x, y):
-        return x - y
+        It initializes ratings as a function of time and label.
+
+        Default initialization behavior is to return one-half the
+        mean outcome value if the labels commute, otherwise 0.
+
+        """
+        return .5*self.mean_value if self.commutes else 0
+
+    def regression_coeff(self, elapsed_time):
+        """
+        Customize this function for a given subclass.
+
+        It computes the regression coefficient — prefactor multiplying the
+        rating of each team evaluated at each update — as a function of
+        elapsed time since the last rating update for that label.
+
+        Default behavior is to return 1, i.e. no rating regression.
+
+        """
+        return 1
 
     def _examples(self, times, labels1, labels2, values, biases):
         """
@@ -95,10 +102,10 @@ class Elora:
         else:
             biases = np.array(biases, dtype='float', ndmin=1)
 
-        self.mean_val = values.mean()
-
-        self.initial_time = times.min()
-
+        self.first_update_time = times.min()
+        self.last_update_time = times.max()
+        self.mean_value = values.mean()
+        self.commutator = 0 if self.commutes else self.mean_value
         self.labels = np.union1d(labels1, labels2)
 
         self.examples = np.sort(
@@ -114,9 +121,9 @@ class Elora:
                 'label2',
                 'value',
                 'bias',
-            )), order='time', axis=0)
+            )), order=['time', 'label1', 'label2'], axis=0)
 
-    def evolve_state(self, state, time):
+    def evolve_state(self, label, state, time):
         """
         Evolves 'state' to 'time', applying rating regression if necessary
 
@@ -129,12 +136,15 @@ class Elora:
                 {'time': time, 'rating': rating}
 
         """
-        elapsed_seconds = (time - state['time']) / np.timedelta64(1, 's')
-        elapsed_periods = elapsed_seconds / self.seconds_per_period
+        current_rating = state['rating']
+        elapsed_time = time - state['time']
 
-        regress_coeff = self.regress(elapsed_periods)
+        initial_rating = self.initial_rating(time, label)
+        regress = self.regression_coeff(elapsed_time)
 
-        return {'time': time, 'rating': regress_coeff * state['rating']}
+        rating = regress * current_rating + (1 - regress) * initial_rating
+
+        return {'time': time, 'rating': rating}
 
     def get_rating(self, times, labels):
         """
@@ -155,10 +165,16 @@ class Elora:
         ratings = []
 
         for time, label in zip(times, labels):
-            index = self.record[label].time.searchsorted(time)
-            prior_state = self.record[label][max(index - 1, 0)]
-            state = self.evolve_state(prior_state, time)
-            ratings.append(state['rating'])
+            try:
+                label_record = self.record[label]
+                index = label_record.time.searchsorted(time)
+                prior_state = label_record[index - 1]
+                state = self.evolve_state(label, prior_state, time)
+                rating = state['rating']
+            except (KeyError, IndexError):
+                rating = self.initial_rating(time, label)
+
+            ratings.append(rating)
 
         return np.squeeze(ratings)
 
@@ -171,7 +187,7 @@ class Elora:
             labels1 (array of str): comparison labels for first entity
             labels2 (array of str): comparison labels for second entity
             values (array of float): comparison value observed outcomes
-            biases (array of float): comparison bias correct factors,
+            biases (array of float): comparison bias correction factors,
                 default value is 0
 
         """
@@ -182,24 +198,27 @@ class Elora:
         self.record = {label: [] for label in self.labels}
 
         # initialize state for each label
-        prior_rating = .5*self.mean_val if self.commutes else 0
         prior_state = {
-            label: {'time': self.initial_time, 'rating': prior_rating}
-            for label in self.labels
-        }
+            label: {
+                'time': self.first_update_time,
+                'rating': self.initial_rating(self.first_update_time, label)}
+            for label in self.labels}
 
         # loop over all paired comparison training examples
         for time, label1, label2, value, bias in self.examples:
 
-            state1 = self.evolve_state(prior_state[label1], time)
-            state2 = self.evolve_state(prior_state[label2], time)
+            state1 = self.evolve_state(label1, prior_state[label1], time)
+            state2 = self.evolve_state(label2, prior_state[label2], time)
 
-            value_prior = state1['rating'] + self.commutator*state2['rating']
+            value_prior = (
+                self.compare(state1['rating'], state2['rating']) +
+                self.commutator + bias)
 
             rating_change = self.k * (value - value_prior)
 
+            sign = 1 if self.commutes else -1
             state1['rating'] += rating_change
-            state2['rating'] += self.commutator*rating_change
+            state2['rating'] += sign*rating_change
 
             # record current ratings
             for label, state in [(label1, state1), (label2, state2)]:
@@ -209,11 +228,7 @@ class Elora:
         # convert ratings history to a structured rec.array
         for label in self.record.keys():
             self.record[label] = np.rec.array(
-                self.record[label], dtype=[
-                    ('time', 'datetime64[s]'),
-                    ('rating', 'float')
-                ]
-            )
+                self.record[label], dtype=self.dtype)
 
     def cdf(self, x, times, labels1, labels2, biases=0):
         """
@@ -246,7 +261,7 @@ class Elora:
         ratings1 = self.get_rating(times, labels1)
         ratings2 = self.get_rating(times, labels2)
 
-        loc = ratings1 + self.commutator*ratings2 + biases
+        loc = self.compare(ratings1, ratings2) + self.commutator + biases
 
         return norm.cdf(x, loc=loc, scale=self.scale)
 
@@ -280,9 +295,9 @@ class Elora:
         ratings1 = self.get_rating(times, labels1)
         ratings2 = self.get_rating(times, labels2)
 
-        loc = ratings1 + self.commutator*ratings2 + biases
+        loc = self.compare(ratings1, ratings2) + self.commutator + biases
 
-        return norm.sf(x, loc=loc, scale=self.scale)
+        return np.squeeze(norm.sf(x, loc=loc, scale=self.scale))
 
     def pdf(self, x, times, labels1, labels2, biases=0):
         """
@@ -314,9 +329,9 @@ class Elora:
         ratings1 = self.get_rating(times, labels1)
         ratings2 = self.get_rating(times, labels2)
 
-        loc = ratings1 + self.commutator*ratings2 + biases
+        loc = self.compare(ratings1, ratings2) + self.commutator + biases
 
-        return norm.pdf(x, loc=loc, scale=self.scale)
+        return np.squeeze(norm.pdf(x, loc=loc, scale=self.scale))
 
     def percentile(self, p, times, labels1, labels2, biases=0):
         """
@@ -348,14 +363,14 @@ class Elora:
         ratings1 = self.get_rating(times, labels1)
         ratings2 = self.get_rating(times, labels2)
 
-        loc = ratings1 + self.commutator*ratings2 + biases
+        loc = self.compare(ratings1, ratings2) + self.commutator + biases
 
         p = np.true_divide(p, 100.0)
 
         if np.count_nonzero(p < 0.0) or np.count_nonzero(p > 1.0):
             raise ValueError("percentiles must be in the range [0, 100]")
 
-        return norm.ppf(p, loc=loc, scale=self.scale)
+        return np.squeeze(norm.ppf(p, loc=loc, scale=self.scale))
 
     def quantile(self, q, times, labels1, labels2, biases=0):
         """
@@ -388,9 +403,10 @@ class Elora:
         ratings1 = self.get_rating(times, labels1)
         ratings2 = self.get_rating(times, labels2)
 
-        loc = ratings1 + self.commutator*ratings2 + biases
+        loc = self.compare(ratings1, ratings2) + self.commutator + biases
 
-        return norm.ppf(q, loc=loc, scale=self.scale)
+        return np.squeeze(
+            norm.ppf(q, loc=loc[:, np.newaxis], scale=self.scale))
 
     def mean(self, times, labels1, labels2, biases=0):
         """
@@ -420,11 +436,11 @@ class Elora:
         ratings1 = self.get_rating(times, labels1)
         ratings2 = self.get_rating(times, labels2)
 
-        loc = ratings1 + self.commutator*ratings2 + biases
+        loc = self.compare(ratings1, ratings2) + self.commutator + biases
 
-        return loc
+        return np.squeeze(loc)
 
-    def residuals(self, standardize=False):
+    def residuals(self, y_true=None, standardize=False):
         """
         Computes residuals of the model predictions for each training example
 
@@ -436,25 +452,27 @@ class Elora:
             residuals (array of float): residuals for each example
 
         """
-        predicted = self.mean(
+        y_pred = self.mean(
             self.examples.time,
             self.examples.label1,
             self.examples.label2,
-            self.examples.bias
-        )
+            self.examples.bias)
 
-        observed = self.examples.value
+        if y_true is None:
+            y_true = self.examples.value
 
-        residuals = observed - predicted
+        residuals = y_true - y_pred
 
         if standardize is True:
 
+            quantiles = [.159, .841]
+
             qlo, qhi = self.quantile(
+                quantiles,
                 self.examples.time,
                 self.examples.label1,
                 self.examples.label2,
-                self.examples.bias,
-                q=[.159, .841],
+                self.examples.bias
             ).T
 
             residuals /= .5*abs(qhi - qlo)
@@ -476,8 +494,7 @@ class Elora:
         """
         ranked_list = [
             (label, np.asscalar(self.get_rating(time, label)))
-            for label in self.labels
-        ]
+            for label in self.labels]
 
         return sorted(ranked_list, key=lambda v: v[1], reverse=True)
 
@@ -503,11 +520,8 @@ class Elora:
         times = np.array(times, dtype='datetime64[s]', ndmin=1)
         labels1 = np.array(labels1, dtype='str', ndmin=1)
         labels2 = np.array(labels2, dtype='str', ndmin=1)
-
         ratings1 = self.get_rating(times, labels1)
         ratings2 = self.get_rating(times, labels2)
-
-        loc = ratings1 + self.commutator*ratings2 + biases
 
         if np.isscalar(biases):
             biases = np.full_like(times, biases, dtype='float')
@@ -517,4 +531,25 @@ class Elora:
         if size < 1 or not isinstance(size, int):
             raise ValueError("sample size must be a positive integer")
 
+        loc = self.compare(ratings1, ratings2) + self.commutator + biases
+
         return norm.rvs(loc=loc, scale=self.scale, size=size)
+
+    def plot_ratings(self, label_regex):
+        """
+        Plot rating history for all labels matching the label regex
+
+        """
+        labels = [
+            label for label in self.record.keys()
+            if re.match(label_regex, label)]
+
+        for label in labels:
+            time = self.record[label].time
+            rating = self.record[label].rating
+            plt.plot(time, rating, 'o', label=label)
+
+        plt.xlabel('time')
+        plt.ylabel('rating')
+        plt.legend()
+        plt.show()

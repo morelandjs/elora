@@ -3,9 +3,6 @@ ELORA
 
 *Elo regressor algorithm*
 
-.. image:: https://travis-ci.org/morelandjs/melo.svg?branch=master
-    :target: https://travis-ci.org/morelandjs/melo
-
 Documentation
 -------------
 
@@ -36,29 +33,25 @@ Example usage::
        in zip(scores_home, scores_away)]
 
    # hyperparameters and options
-   k = 0.245
-   regress = lambda months: .413 if months > 3 else 0
-   regress_unit = 'month'
+   k = 0.07
+   scale = 13
    commutes = False
 
    # initialize the estimator
-   nfl_spreads = Elora(
-      k, regress=regress,
-      regress_unit=regress_unit, commutes=False
-   )
+   nfl_spreads = Elora(k, scale=scale, commutes=commutes)
 
    # fit the estimator to the training data
    nfl_spreads.fit(dates, teams_home, teams_away, spreads, biases=2.6)
 
    # specify a comparison time
-   time = nfl_spreads.last_update
+   time = nfl_spreads.last_update_time
 
    # predict the mean outcome at that time
    mean = nfl_spreads.mean(time, 'CLE', 'KC')
    print('CLE VS KC: {}'.format(mean))
 
    # rank nfl teams at end of 2018 regular season
-   rankings = nfl_spreads.rank(time, statistic='mean')
+   rankings = nfl_spreads.rank(time)
    for team, rank in rankings:
        print('{}: {}'.format(team, rank))
 
