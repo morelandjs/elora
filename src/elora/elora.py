@@ -1,7 +1,6 @@
 from operator import add, sub
 import re
 
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import norm
 
@@ -545,22 +544,3 @@ class Elora:
         loc = self.compare(ratings1, ratings2) + self.commutator + biases
 
         return norm.rvs(loc=loc, scale=self.scale, size=size)
-
-    def plot_ratings(self, label_regex):
-        """
-        Plot rating history for all labels matching the label regex
-
-        """
-        labels = [
-            label for label in self.record.keys()
-            if re.match(label_regex, label)]
-
-        for label in labels:
-            time = self.record[label].time
-            rating = self.record[label].rating
-            plt.plot(time, rating, 'o', label=label)
-
-        plt.xlabel('time')
-        plt.ylabel('rating')
-        plt.legend()
-        plt.show()
