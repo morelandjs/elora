@@ -7,17 +7,15 @@ from scipy.stats import norm
 
 
 class Elora:
-    """
-    Elo regressor algorithm (elora)
-
-    Analytic implemention of margin-dependent Elo assuming normally
-    distributed outcomes.
-
-    Author: J. Scott Moreland
-
-    """
     def __init__(self, k, scale=1, commutes=False):
         """
+        Elo regressor algorithm (elora)
+
+        Analytic implemention of margin-dependent Elo assuming normally
+        distributed outcomes.
+
+        Author: J. Scott Moreland
+
         Args:
             k (float): prefactor multiplying the rating exhanged between a pair
                 of labels for a given comparison
@@ -55,30 +53,45 @@ class Elora:
         self.examples = None
         self.record = None
 
-    def initial_rating(self, time, label):
+    @property
+    def equilibrium_rating(self):
         """
         Customize this function for a given subclass.
 
-        It initializes ratings as a function of time and label.
+        It computes the equilibrium rating, equal to the rating one would
+        expect if all labels were interchangeable.
 
-        Default initialization behavior is to return one-half the
-        mean outcome value if the labels commute, otherwise 0.
+        Default behavior is to return one-half the mean outcome value
+        if the labels commute, otherwise 0.
 
         """
         return .5*self.mean_value if self.commutes else 0
+
+    def initial_state(self, time, label):
+        """
+        Customize this function for a given subclass.
+
+        It returns the initial state for a label which has never been
+        seen before.
+
+        Default behavior is to return the equilibrium_rating at the
+        specified time.
+
+        """
+        return {'time': time, 'rating': self.equilibrium_rating}
 
     def regression_coeff(self, elapsed_time):
         """
         Customize this function for a given subclass.
 
-        It computes the regression coefficient — prefactor multiplying the
-        rating of each team evaluated at each update — as a function of
+        It computes the regression coefficient—prefactor multiplying the
+        rating of each team evaluated at each update—as a function of
         elapsed time since the last rating update for that label.
 
         Default behavior is to return 1, i.e. no rating regression.
 
         """
-        return 1
+        return 1.0
 
     def _examples(self, times, labels1, labels2, values, biases):
         """
@@ -136,13 +149,12 @@ class Elora:
                 {'time': time, 'rating': rating}
 
         """
-        current_rating = state['rating']
+        rating = state['rating']
         elapsed_time = time - state['time']
 
-        initial_rating = self.initial_rating(time, label)
         regress = self.regression_coeff(elapsed_time)
 
-        rating = regress * current_rating + (1 - regress) * initial_rating
+        rating = regress * rating + (1.0 - regress) * self.equilibrium_rating
 
         return {'time': time, 'rating': rating}
 
@@ -168,13 +180,13 @@ class Elora:
             try:
                 label_record = self.record[label]
                 index = label_record.time.searchsorted(time)
-                prior_state = label_record[index - 1]
+                prev_index = max(index - 1, 0)
+                prior_state = label_record[prev_index]
                 state = self.evolve_state(label, prior_state, time)
-                rating = state['rating']
-            except (KeyError, IndexError):
-                rating = self.initial_rating(time, label)
+            except KeyError:
+                state = self.initial_state(time, label)
 
-            ratings.append(rating)
+            ratings.append(state['rating'])
 
         return np.squeeze(ratings)
 
@@ -197,23 +209,22 @@ class Elora:
         # initialize empty record for each label
         self.record = {label: [] for label in self.labels}
 
-        # initialize state for each label
-        prior_state = {
-            label: {
-                'time': self.first_update_time,
-                'rating': self.initial_rating(self.first_update_time, label)}
-            for label in self.labels}
+        # keep track of prior state and rating for each label
+        prior_state_dict = {}
 
         # loop over all paired comparison training examples
         for time, label1, label2, value, bias in self.examples:
 
-            state1 = self.evolve_state(label1, prior_state[label1], time)
-            state2 = self.evolve_state(label2, prior_state[label2], time)
+            prior_state1 = prior_state_dict.get(
+                label1, self.initial_state(time, label1))
+            prior_state2 = prior_state_dict.get(
+                label2, self.initial_state(time, label2))
 
-            value_prior = (
-                self.compare(state1['rating'], state2['rating']) +
-                self.commutator + bias)
+            state1 = self.evolve_state(label1, prior_state1, time)
+            state2 = self.evolve_state(label2, prior_state2, time)
 
+            comparison = self.compare(state1['rating'], state2['rating'])
+            value_prior = comparison + self.commutator + bias
             rating_change = self.k * (value - value_prior)
 
             sign = 1 if self.commutes else -1
@@ -223,7 +234,7 @@ class Elora:
             # record current ratings
             for label, state in [(label1, state1), (label2, state2)]:
                 self.record[label].append((state['time'], state['rating']))
-                prior_state[label] = state.copy()
+                prior_state_dict[label] = state.copy()
 
         # convert ratings history to a structured rec.array
         for label in self.record.keys():

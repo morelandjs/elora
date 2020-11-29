@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
-
-from nose.tools import assert_almost_equal
-
 import numpy as np
 
-from ..elora import Elora
+from elora import Elora
+
+
+def assert_almost_equal(x, y, TINY=1e-4):
+    """
+    Check that x == y within some tolerance
+
+    """
+    assert abs(x - y) < TINY
 
 
 def test_class_init():
@@ -47,34 +52,44 @@ def test_class_init():
     assert elora.last_update_time == times.max()
 
 
-def test_initial_rating():
+def test_equilibrium_rating():
     """
-    Checking initial rating
+    Check that ratings regress to equilibrium rating
 
     """
     init_rating = np.float(np.random.uniform(-10, 10, 1))
+    equilibrium_rating = np.float(np.random.uniform(-10, 10, 1))
 
     class EloraTest(Elora):
-        def initial_rating(self, time, label):
-            return init_rating
+
+        def initial_state(self, time, label):
+            return {'time': time, 'rating': init_rating}
+
+        @property
+        def equilibrium_rating(self):
+            return equilibrium_rating
+
+        def regression_coeff(self, elapsed_time):
+            return 1e-3
+
+    samples = 10**4
+    times = np.arange(samples).astype('datetime64[s]')
+    labels1 = np.repeat('alpha', samples)
+    labels2 = np.repeat('beta', samples)
+    values = np.random.random(samples)
 
     for commutes in [True, False]:
-        elora = EloraTest(np.random.rand(1), commutes=commutes)
-
-        times = np.arange(100).astype('datetime64[s]')
-        labels1 = np.repeat('alpha', 100)
-        labels2 = np.repeat('beta', 100)
-        values = np.random.random(100)
-
+        k = 1e-2
+        elora = EloraTest(k, commutes=commutes)
         elora.fit(times, labels1, labels2, values)
 
-        # check initial rating for label1
-        rating_alpha = elora.get_rating(times[0], 'alpha')
-        assert_almost_equal(rating_alpha, init_rating)
+        # check equilibrium rating for label1
+        rating_alpha = elora.get_rating(times[-1], 'alpha')
+        assert_almost_equal(rating_alpha, elora.equilibrium_rating, TINY=k)
 
-        # check initial rating for label2
-        rating_beta = elora.get_rating(times[0], 'beta')
-        assert_almost_equal(rating_beta, init_rating)
+        # check equilibrium rating for label2
+        rating_beta = elora.get_rating(times[-1], 'beta')
+        assert_almost_equal(rating_beta, elora.equilibrium_rating, TINY=k)
 
 
 def test_regression_coeff():
@@ -86,7 +101,8 @@ def test_regression_coeff():
     step = np.random.randint(0, 100)
 
     class EloraTest(Elora):
-        def initial_rating(self, time, label):
+        @property
+        def equilibrium_rating(self):
             return 0
 
         def regression_coeff(self, elapsed_time):
@@ -118,14 +134,20 @@ def test_rating_conservation():
     Check that rating is conserved when commutes is False
 
     """
-    init_rating = np.float(np.random.uniform(-10, 10, size=1))
+    _initial_rating = np.random.uniform(low=-10, high=10)
+    _equilibrium_rating = np.random.uniform(low=-10, high=10)
+    _k = np.random.uniform(low=0.01, high=1)
 
     class EloraTest(Elora):
-        def initial_rating(self, time, label):
-            return init_rating
 
-    k = np.random.uniform(0.01, 1, size=1)
-    elora = EloraTest(k, commutes=False)
+        @property
+        def equilibrium_rating(self):
+            return _equilibrium_rating
+
+        def initial_rating(self, time, label):
+            return _initial_rating
+
+    elora = EloraTest(_k, commutes=False)
 
     times = np.linspace(0, 1000, 100).astype('datetime64[s]')
     labels1 = np.repeat('alpha', 100)
@@ -137,7 +159,8 @@ def test_rating_conservation():
     # test rating conservation at random times
     for time in np.random.uniform(0, 1000, size=10).astype('datetime64[s]'):
         ratings = [elora.get_rating(time, label) for label in elora.labels]
-        assert_almost_equal(sum(ratings), init_rating*elora.labels.size)
+        assert_almost_equal(
+            sum(ratings), _equilibrium_rating*elora.labels.size)
 
 
 def test_get_rating():
@@ -161,7 +184,7 @@ def test_get_rating():
     one_hour = np.timedelta64(1, 'h')
     elora.record['alpha'] = np.rec.array(
         [(time - one_hour, 1), (time, 2), (time + one_hour, 3)],
-        dtype=[('time', 'datetime64[s]'), ('rating', 'float', 1)]
+        dtype=[('time', 'datetime64[s]'), ('rating', 'float')]
     )
 
     # check rating value at time
