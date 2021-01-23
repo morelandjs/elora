@@ -26,7 +26,7 @@ class Elora:
         Attributes:
             first_update_time (np.datetime64): time of the first comparison
             last_update_time (np.datetime64): time of the last comparison
-            median_value (float): mean expected comparison value
+            median_value (float): median expected comparison value
             labels (array of string): unique compared entity labels
             examples (ndarray): comparison training examples
             record (dict of ndarray): record of time and rating states
@@ -60,7 +60,7 @@ class Elora:
         It computes the equilibrium rating, equal to the rating one would
         expect if all labels were interchangeable.
 
-        Default behavior is to return one-half the mean outcome value
+        Default behavior is to return one-half the median outcome value
         if the labels commute, otherwise 0.
 
         """
