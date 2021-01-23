@@ -26,7 +26,7 @@ class Elora:
         Attributes:
             first_update_time (np.datetime64): time of the first comparison
             last_update_time (np.datetime64): time of the last comparison
-            mean_value (float): mean expected comparison value
+            median_value (float): mean expected comparison value
             labels (array of string): unique compared entity labels
             examples (ndarray): comparison training examples
             record (dict of ndarray): record of time and rating states
@@ -46,7 +46,7 @@ class Elora:
 
         self.first_update_time = None
         self.last_update_time = None
-        self.mean_value = None
+        self.median_value = None
         self.commutator = None
         self.labels = None
         self.examples = None
@@ -64,7 +64,7 @@ class Elora:
         if the labels commute, otherwise 0.
 
         """
-        return .5*self.mean_value if self.commutes else 0
+        return .5*self.median_value if self.commutes else 0
 
     def initial_state(self, time, label):
         """
@@ -116,8 +116,8 @@ class Elora:
 
         self.first_update_time = times.min()
         self.last_update_time = times.max()
-        self.mean_value = values.mean()
-        self.commutator = 0 if self.commutes else self.mean_value
+        self.median_value = np.median(values)
+        self.commutator = 0 if self.commutes else self.median_value
         self.labels = np.union1d(labels1, labels2)
 
         self.examples = np.sort(
