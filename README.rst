@@ -24,7 +24,7 @@ Example usage::
    from elora import Elora
 
    # the package comes pre-bundled with an example dataset
-   pkgdata = pkgutil.get_data('melo', 'nfl.dat').splitlines()
+   pkgdata = pkgutil.get_data('elora', 'nfl.dat').splitlines()
    dates, teams_home, scores_home, teams_away, scores_away = zip(
        *[l.split() for l in pkgdata[1:]])
 
@@ -33,8 +33,8 @@ Example usage::
        in zip(scores_home, scores_away)]
 
    # hyperparameters and options
-   k = 0.07
-   scale = 13
+   k = 0.06
+   scale = 13.5
    commutes = False
 
    # initialize the estimator

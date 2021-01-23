@@ -7,8 +7,10 @@ elora
 * Language: Python
 * Source code: `github:morelandjs/elora <https://github.com/morelandjs/elora>`_
 
-``elora`` generalizes the `Bradley-Terry <https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model>`_ paired comparison model beyond binary outcomes to include margin-of-victory information.
-The framework is general and has numerous applications in ranking, estimation, and time series prediction.
+``elora`` is a simple paired comparison model, loosely based on the
+`Bradley-Terry <https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model>`_
+model, that regresses sequential comparison data with continuous (non-categorical)
+response variables.
 
 Quick start
 -----------
@@ -25,9 +27,8 @@ Example usage: ::
    import numpy as np
    from elora import Elora
 
-
    # the package comes pre-bundled with an example dataset
-   pkgdata = pkgutil.get_data('melo', 'nfl.dat').splitlines()
+   pkgdata = pkgutil.get_data('elora', 'nfl.dat').splitlines()
    dates, teams_home, scores_home, teams_away, scores_away = zip(
        *[l.split() for l in pkgdata[1:]])
 
@@ -42,7 +43,7 @@ Example usage: ::
            return .6 if elapsed_days > 90 else 1
 
    # instantiate the estimator class object
-   nfl_spreads = EloraNFL(0.07, scale=14, commutes=False)
+   nfl_spreads = EloraNFL(0.07, scale=13.5, commutes=False)
 
    # fit the estimator to the training data
    nfl_spreads.fit(dates, teams_home, teams_away, spreads)

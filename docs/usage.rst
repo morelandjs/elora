@@ -130,5 +130,3 @@ Prediction functions
 .. autofunction:: elora.Elora.rank
 
 .. autofunction:: elora.Elora.sample
-
-.. autofunction:: elora.Elora.plot_ratings
