@@ -3,10 +3,13 @@ ELORA
 
 *Elo regressor algorithm (elora)*
 
+.. image:: https://travis-ci.org/morelandjs/elora.svg?branch=master
+    :target: https://travis-ci.org/morelandjs/elora
+
 Documentation
 -------------
 
-Coming soon...
+`moreland.dev/projects/elora <https://moreland.dev/projects/elora>`_
 
 Quick start
 -----------
