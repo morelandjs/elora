@@ -147,7 +147,7 @@ class League:
         self.labels2 = locs2.astype(str)
 
 
-league = League(10**6)
+league = League(10**5)
 
 
 @plot
@@ -164,8 +164,8 @@ def quickstart_example(scale=1, size=100):
     times = np.arange(spreads.size).astype('datetime64[s]')
 
     # train the model on the list of comparisons
-    elora = Elora(k=.05)
-    elora.fit(times, labels1, labels2, spreads)
+    elora = Elora(times, labels1, labels2, spreads)
+    elora.fit(10, False)
 
     # predicted and true (analytic) comparison values
     pred_times = np.repeat(elora.last_update_time, times.size)
@@ -190,8 +190,8 @@ def validate_spreads():
 
     # train margin-dependent Elo model
     lines = np.arange(-49.5, 50.5)
-    elora = Elora(commutes=False, k=1e-4, scale=np.sqrt(2*league.scale**2))
-    elora.fit(league.times, league.labels1, league.labels2, league.spreads)
+    elora = Elora(league.times, league.labels1, league.labels2, league.spreads)
+    elora.fit(.1, False)
 
     # exact prior distribution
     sf = norm.sf(lines, loc=elora.median_value, scale=np.sqrt(2*10**2))
@@ -203,8 +203,7 @@ def validate_spreads():
 
     plot_args = [
         (ax_prior, elora.first_update_time, 'prior'),
-        (ax2_post, elora.last_update_time, 'posterior'),
-    ]
+        (ax2_post, elora.last_update_time, 'posterior')]
 
     for ax, time, title in plot_args:
         for n, label2 in enumerate(label2_list):
@@ -252,8 +251,8 @@ def validate_totals():
 
     # train margin-dependent Elo model
     lines = np.arange(149.5, 250.5)
-    elora = Elora(commutes=True, k=1e-4, scale=np.sqrt(2*league.scale**2))
-    elora.fit(league.times, league.labels1, league.labels2, league.totals)
+    elora = Elora(league.times, league.labels1, league.labels2, league.totals)
+    elora.fit(.1, True)
 
     # exact prior distribution
     sf = norm.sf(lines, loc=elora.median_value, scale=np.sqrt(2*10**2))
@@ -265,8 +264,7 @@ def validate_totals():
 
     plot_args = [
         (ax_prior, elora.first_update_time, 'prior'),
-        (ax2_post, elora.last_update_time, 'posterior'),
-    ]
+        (ax2_post, elora.last_update_time, 'posterior')]
 
     for ax, time, title in plot_args:
         for n, label2 in enumerate(label2_list):
@@ -318,17 +316,13 @@ def convergence():
     # point spread and point total subplots
     subplots = [
         (False, 0, league.spreads, 'probability spread > 0'),
-        (True, 200, league.totals, 'probability total > 200'),
-    ]
+        (True, 200, league.totals, 'probability total > 200')]
 
     for ax, (commutes, line, values, ylabel) in zip(axes, subplots):
 
         # train margin-dependent Elo model
-        elora = Elora(
-            commutes=commutes, k=1e-4,
-            scale=np.sqrt(2*league.scale**2))
-
-        elora.fit(league.times, league.labels1, league.labels2, values)
+        elora = Elora(league.times, league.labels1, league.labels2, values)
+        elora.fit(.1, commutes)
 
         for label2 in label2_list:
 
@@ -362,7 +356,7 @@ def convergence():
 
 
 @plot
-def initial_rating(scale=10, size=100):
+def initial_rating(size=100):
     """
     Test initial rating and equilibrium rating
 
@@ -377,20 +371,21 @@ def initial_rating(scale=10, size=100):
     labels2 = np.append(labels2, np.full(50, 'label2'))
     values = np.append(values, np.full(50, 0))
 
-    class EloraTest(Elora):
-        @property
-        def equilibrium_rating(self):
-            return 0
+    #class EloraTest(Elora):
+    #    @property
+    #    def equilibrium_rating(self):
+    #        return 0
 
-        def initial_state(self, time, label):
-            rating = -5 if label == 'label2' else 0
-            return {'time': time, 'rating': rating}
+    #    def initial_state(self, time, label):
+    #        rating = -5 if label == 'label2' else 0
+    #        return {'time': time, 'rating': rating}
 
-        def regression_coeff(self, elapsed_time):
-            return 0.90
+    #    def regression_coeff(self, elapsed_time):
+    #        return 0.90
 
-    elora = EloraTest(.1, commutes=False, scale=np.sqrt(2*scale**2))
-    elora.fit(times, labels1, labels2, values)
+    elora = Elora(times, labels1, labels2, values)
+    elora.fit(.1, False, 1.0)
+    print(elora.scale)
     record = elora.record
 
     plt.plot(record['label1'].time, record['label1'].rating, 'o')
@@ -398,6 +393,7 @@ def initial_rating(scale=10, size=100):
     plt.plot(np.array(100).astype('datetime64[s]'), [-5], 'o')
     plt.axhline(0, linestyle='dashed')
     plt.axhline(-5, linestyle='dashed')
+    plt.ylim(-10, 10)
 
 
 def main():

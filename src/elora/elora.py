@@ -1,56 +1,66 @@
 from operator import add, sub
-import re
+import time
 
 import numpy as np
 from scipy.stats import norm
+from sklearn.preprocessing import StandardScaler
+
+np.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)})
 
 
 class Elora:
-    def __init__(self, k, scale=1, commutes=False):
+    def __init__(self, times, labels1, labels2, values, biases=0):
         """
-        Elo regressor algorithm (elora)
-
-        Analytic implemention of margin-dependent Elo assuming normally
-        distributed outcomes.
+        Paired comparison regressor assuming sample values distributed
+        according to a multivariate normal distribution.
 
         Author: J. Scott Moreland
 
         Args:
-            k (float): prefactor multiplying the rating exhanged between a pair
-                of labels for a given comparison
-            scale (float): scale factor for the distribution used to model the
-                outcome of the comparison variable; must be greater than 0
-            commutes (bool): true if comparisons commute under label
-                interchange; false otherwise (default is false)
+            times (array of np.datetime64): comparison datetimes
+            labels1 (array of str): comparison labels for first entity
+            labels2 (array of str): comparison labels for second entity
+            values (array of float): comparison value observed outcomes
+            biases (array of float or scalar, optional): comparison bias
+                corrections
 
         Attributes:
+            comparisons (np.recarray): time-sorted numpy record array of
+                (time, label1, label2, bias) samples
+            values (np.array): time-sorted numpy array of sampled outcomes
             first_update_time (np.datetime64): time of the first comparison
             last_update_time (np.datetime64): time of the last comparison
             median_value (float): median expected comparison value
             labels (array of string): unique compared entity labels
-            examples (ndarray): comparison training examples
-            record (dict of ndarray): record of time and rating states
 
         """
-        if k < 0:
-            raise ValueError('k must be a non-negative real number')
+        times = np.array(times, dtype='datetime64[s]', ndmin=1)
+        labels1 = np.array(labels1, dtype='str', ndmin=1)
+        labels2 = np.array(labels2, dtype='str', ndmin=1)
+        values = np.array(values, dtype='float').reshape(times.size, -1)
 
-        if scale <= 0:
-            raise ValueError('scale must be a positive real number')
+        if np.isscalar(biases):
+            biases = np.full_like(times, biases, dtype='float')
+        else:
+            biases = np.array(biases, dtype='float', ndmin=1)
 
-        self.k = k
-        self.scale = scale
-        self.commutes = commutes
-        self.compare = add if self.commutes else sub
-        self.dtype = [('time', 'datetime64[s]'), ('rating', 'float')]
+        comparisons = np.rec.fromarrays(
+            [times, labels1, labels2, biases],
+            names=('time', 'label1', 'label2', 'bias'))
 
-        self.first_update_time = None
-        self.last_update_time = None
-        self.median_value = None
-        self.commutator = None
-        self.labels = None
-        self.examples = None
-        self.record = None
+        indices = np.argsort(comparisons, order=['time', 'label1', 'label2'])
+        self.comparisons = comparisons[indices]
+        self.values = values[indices]
+
+        # scale values to zero mean and unit variance
+        # NOTE: this must occur before the median value is computed
+        self.scaler = StandardScaler(copy=False)
+        self.scaler.fit_transform(self.values)
+
+        self.first_update_time = times.min()
+        self.last_update_time = times.max()
+        self.median_value = np.median(self.values, axis=0)
+        self.labels = np.union1d(labels1, labels2)
 
     @property
     def equilibrium_rating(self):
@@ -64,7 +74,12 @@ class Elora:
         if the labels commute, otherwise 0.
 
         """
-        return .5*self.median_value if self.commutes else 0
+        rating = (
+            .5*self.median_value
+            if self.commutes else
+            np.zeros_like(self.median_value))
+
+        return rating
 
     def initial_state(self, time, label):
         """
@@ -92,49 +107,6 @@ class Elora:
         """
         return 1.0
 
-    def _examples(self, times, labels1, labels2, values, biases):
-        """
-        Reads training examples and initializes class variables.
-
-        Args:
-            times (array of np.datetime64): comparison datetimes
-            labels1 (array of str): comparison labels for first entity
-            labels2 (array of str): comparison labels for second entity
-            values (array of float): comparison value observed outcomes
-            biases (array of float): comparison bias correct factors
-
-        """
-        times = np.array(times, dtype='datetime64[s]', ndmin=1)
-        labels1 = np.array(labels1, dtype='str', ndmin=1)
-        labels2 = np.array(labels2, dtype='str', ndmin=1)
-        values = np.array(values, dtype='float', ndmin=1)
-
-        if np.isscalar(biases):
-            biases = np.full_like(times, biases, dtype='float')
-        else:
-            biases = np.array(biases, dtype='float', ndmin=1)
-
-        self.first_update_time = times.min()
-        self.last_update_time = times.max()
-        self.median_value = np.median(values)
-        self.commutator = 0 if self.commutes else self.median_value
-        self.labels = np.union1d(labels1, labels2)
-
-        self.examples = np.sort(
-            np.rec.fromarrays([
-                times,
-                labels1,
-                labels2,
-                values,
-                biases,
-            ], names=(
-                'time',
-                'label1',
-                'label2',
-                'value',
-                'bias',
-            )), order=['time', 'label1', 'label2'], axis=0)
-
     def evolve_state(self, label, state, time):
         """
         Evolves 'state' to 'time', applying rating regression if necessary
@@ -156,6 +128,92 @@ class Elora:
         rating = regress * rating + (1.0 - regress) * self.equilibrium_rating
 
         return {'time': time, 'rating': rating}
+
+    def fit(self, learning_rate, commutes, iterations=3):
+        """
+        Primary routine that performs model calibration. It is called
+        recursively by the `fit` routine.
+
+        Args:
+            learning_rate (float): coefficient that multiplies the loss
+                gradient to compute the ratings update vector.
+            commutes (bool): false if the observed values change sign under
+                label interchange and true otheriwse.
+            iterations (int): number of times to retrain and refine the
+                estimate of the covariance matrix
+
+        """
+        # scale values to zero mean and unit variance
+        self.scaler = StandardScaler(copy=False)
+        self.scaler.fit_transform(self.values)
+
+        # set global class attributes
+        self.first_update_time = times.min()
+        self.last_update_time = times.max()
+        self.median_value = np.median(self.values, axis=0)
+        self.labels = np.union1d(labels1, labels2)
+
+        # commutative comparisons change sign under label interchange
+        self.commutes = commutes
+        sign = 1 if self.commutes else -1
+        self.compare = add if commutes else sub
+        self.commutator = (
+            np.zeros_like(self.median_value)
+            if commutes else
+            self.median_value)
+
+        # initialize empty record for each label
+        self.record = {label: [] for label in self.labels}
+
+        # keep track of prior state and rating for each label
+        prior_state_dict = {}
+
+        # track prediction residuals
+        residuals = np.empty_like(self.values)
+
+        # initialize covariance terms
+        cov = np.array(np.cov(self.values, rowvar=False), ndmin=2)
+        prec = np.linalg.inv(cov)
+
+        # refine covariance after each iteration
+        for iteration in range(iterations):
+
+            # loop over all paired comparison training examples
+            for idx, (comp, value) in enumerate(
+                    zip(self.comparisons, self.values)):
+
+                prior_state1 = prior_state_dict.get(
+                    comp.label1, self.initial_state(comp.time, comp.label1))
+                prior_state2 = prior_state_dict.get(
+                    comp.label2, self.initial_state(comp.time, comp.label2))
+
+                state1 = self.evolve_state(comp.label1, prior_state1, comp.time)
+                state2 = self.evolve_state(comp.label2, prior_state2, comp.time)
+
+                loc = self.compare(state1['rating'], state2['rating'])
+                value_pred = loc + self.commutator + comp.bias
+                residuals[idx] = value - value_pred
+
+                rating_change = learning_rate * np.dot(prec, value - value_pred)
+                state1['rating'] += rating_change
+                state2['rating'] += sign*rating_change
+
+                # record current ratings
+                for label, state in [
+                        (comp.label1, state1), (comp.label2, state2)]:
+                    self.record[label].append((state['time'], state['rating']))
+                    prior_state_dict[label] = state.copy()
+
+            # compute and return residual covariance matrix
+            cov = np.array(np.cov(residuals, rowvar=False), ndmin=2)
+            prec = np.linalg.inv(cov)
+            self.scale = np.sqrt(cov.diagonal()).squeeze()
+
+        _, nfeat = self.values.shape
+        dtype = [('time', 'datetime64[s]'), ('rating', 'float', nfeat)]
+
+        for label in self.record.keys():
+            self.record[label] = np.rec.array(self.record[label], dtype=dtype)
 
     def get_rating(self, times, labels):
         """
@@ -188,57 +246,6 @@ class Elora:
             ratings.append(state['rating'])
 
         return np.squeeze(ratings)
-
-    def fit(self, times, labels1, labels2, values, biases=0):
-        """
-        Calibrates the model based on the training examples.
-
-        Args:
-            times (array of np.datetime64): comparison datetimes
-            labels1 (array of str): comparison labels for first entity
-            labels2 (array of str): comparison labels for second entity
-            values (array of float): comparison value observed outcomes
-            biases (array of float): comparison bias correction factors,
-                default value is 0
-
-        """
-        # read training inputs and initialize class variables
-        self._examples(times, labels1, labels2, values, biases)
-
-        # initialize empty record for each label
-        self.record = {label: [] for label in self.labels}
-
-        # keep track of prior state and rating for each label
-        prior_state_dict = {}
-
-        # loop over all paired comparison training examples
-        for time, label1, label2, value, bias in self.examples:
-
-            prior_state1 = prior_state_dict.get(
-                label1, self.initial_state(time, label1))
-            prior_state2 = prior_state_dict.get(
-                label2, self.initial_state(time, label2))
-
-            state1 = self.evolve_state(label1, prior_state1, time)
-            state2 = self.evolve_state(label2, prior_state2, time)
-
-            comparison = self.compare(state1['rating'], state2['rating'])
-            value_prior = comparison + self.commutator + bias
-            rating_change = self.k * (value - value_prior)
-
-            sign = 1 if self.commutes else -1
-            state1['rating'] += rating_change
-            state2['rating'] += sign*rating_change
-
-            # record current ratings
-            for label, state in [(label1, state1), (label2, state2)]:
-                self.record[label].append((state['time'], state['rating']))
-                prior_state_dict[label] = state.copy()
-
-        # convert ratings history to a structured rec.array
-        for label in self.record.keys():
-            self.record[label] = np.rec.array(
-                self.record[label], dtype=self.dtype)
 
     def cdf(self, x, times, labels1, labels2, biases=0):
         """
@@ -489,7 +496,7 @@ class Elora:
 
         return residuals
 
-    def rank(self, time):
+    def rank(self, time, column_index=0):
         """
         Ranks labels by comparing mean of each label to the average label.
 
@@ -503,7 +510,7 @@ class Elora:
 
         """
         ranked_list = [
-            (label, np.asscalar(self.get_rating(time, label)))
+            (label, self.get_rating(time, label)[column_index])
             for label in self.labels]
 
         return sorted(ranked_list, key=lambda v: v[1], reverse=True)
@@ -544,3 +551,52 @@ class Elora:
         loc = self.compare(ratings1, ratings2) + self.commutator + biases
 
         return norm.rvs(loc=loc, scale=self.scale, size=size)
+
+
+if __name__ == '__main__':
+    import pandas as pd
+    import sqlalchemy
+
+    engine = sqlalchemy.create_engine('sqlite:///games.db')
+
+    comp = pd.read_sql(
+        "SELECT datetime, winning_abbr, losing_abbr, winner FROM games", engine)
+    comp['team_home'] = np.where(
+        comp.winner == 'Home', comp.winning_abbr, comp.losing_abbr)
+    comp['team_away'] = np.where(
+        comp.winner == 'Away', comp.winning_abbr, comp.losing_abbr)
+
+    feat = pd.read_sql(
+        "SELECT * FROM games", engine
+    ).select_dtypes(include=np.number)
+
+    away_stats = feat.filter(regex='^away.*', axis=1)
+    away_stats.columns = away_stats.columns.str.replace('away_', '')
+    home_stats = feat.filter(regex='^home.*', axis=1)
+    home_stats.columns = home_stats.columns.str.replace('home_', '')
+    stats = away_stats - home_stats
+
+    # stats = stats[['points']]
+    stats = stats[['points', 'pass_yards', 'rush_yards']]
+    #stats = stats[['points', 'pass_attempts', 'pass_yards', 'rush_attempts',
+    #               'rush_yards', 'third_down_conversions', 'pass_completions',
+    #               'yards_from_penalties', 'penalties']]
+
+    # initialize the estimator
+    nfl_spreads = Elora(comp.datetime, comp.team_away, comp.team_home, stats)
+    print(nfl_spreads.labels)
+
+    # fit the estimator to the training data
+    nfl_spreads.fit(.1, False, iterations=3)
+
+    # specify a comparison time
+    last_time = nfl_spreads.last_update_time
+
+    # predict the mean outcome at that time
+    mean = nfl_spreads.mean(last_time, 'RAV', 'PIT')
+    print('RAV @PIT: {}'.format(mean))
+
+    # rank nfl teams at end of 2018 regular season
+    rankings = nfl_spreads.rank(last_time)
+    for team, rank in rankings:
+        print('{}: {}'.format(team, rank))
