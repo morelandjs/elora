@@ -1,8 +1,7 @@
 from operator import add, sub
-import time
 
 import numpy as np
-from scipy.stats import norm
+from scipy.stats import multivariate_normal
 from sklearn.preprocessing import StandardScaler
 
 np.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)})
@@ -25,7 +24,7 @@ class Elora:
                 corrections
 
         Attributes:
-            comparisons (np.recarray): time-sorted numpy record array of
+            pairs (np.recarray): time-sorted numpy record array of
                 (time, label1, label2, bias) samples
             values (np.array): time-sorted numpy array of sampled outcomes
             first_update_time (np.datetime64): time of the first comparison
@@ -38,61 +37,38 @@ class Elora:
         labels1 = np.array(labels1, dtype='str', ndmin=1)
         labels2 = np.array(labels2, dtype='str', ndmin=1)
         values = np.array(values, dtype='float').reshape(times.size, -1)
+        biases = biases * np.ones(times.shape)
 
-        if np.isscalar(biases):
-            biases = np.full_like(times, biases, dtype='float')
-        else:
-            biases = np.array(biases, dtype='float', ndmin=1)
-
-        comparisons = np.rec.fromarrays(
+        pairs = np.rec.fromarrays(
             [times, labels1, labels2, biases],
             names=('time', 'label1', 'label2', 'bias'))
 
-        indices = np.argsort(comparisons, order=['time', 'label1', 'label2'])
-        self.comparisons = comparisons[indices]
+        indices = np.argsort(pairs, order=['time', 'label1', 'label2'])
+        self.pairs = pairs[indices]
         self.values = values[indices]
+        self.nfeat = values.shape[1]
 
-        # scale values to zero mean and unit variance
-        # NOTE: this must occur before the median value is computed
+        # used to scale values to zero mean and unit variance
         self.scaler = StandardScaler(copy=False)
-        self.scaler.fit_transform(self.values)
 
+        # set useful class attributes
         self.first_update_time = times.min()
         self.last_update_time = times.max()
-        self.median_value = np.median(self.values, axis=0)
         self.labels = np.union1d(labels1, labels2)
 
     @property
-    def equilibrium_rating(self):
+    def initial_rating(self):
         """
         Customize this function for a given subclass.
 
-        It computes the equilibrium rating, equal to the rating one would
+        It computes the initial rating, equal to the rating one would
         expect if all labels were interchangeable.
 
         Default behavior is to return one-half the median outcome value
         if the labels commute, otherwise 0.
 
         """
-        rating = (
-            .5*self.median_value
-            if self.commutes else
-            np.zeros_like(self.median_value))
-
-        return rating
-
-    def initial_state(self, time, label):
-        """
-        Customize this function for a given subclass.
-
-        It returns the initial state for a label which has never been
-        seen before.
-
-        Default behavior is to return the equilibrium_rating at the
-        specified time.
-
-        """
-        return {'time': time, 'rating': self.equilibrium_rating}
+        return np.zeros(self.nfeat)
 
     def regression_coeff(self, elapsed_time):
         """
@@ -107,9 +83,10 @@ class Elora:
         """
         return 1.0
 
-    def evolve_state(self, label, state, time):
+    def evolve_rating(self, rating, elapsed_time):
         """
-        Evolves 'state' to 'time', applying rating regression if necessary
+        Evolves 'state' to 'time', applying rating regression if necessary,
+        anf returns the evolved rating.
 
         Args:
             state (dict): state dictionary {'time': time, 'rating': rating}
@@ -120,16 +97,26 @@ class Elora:
                 {'time': time, 'rating': rating}
 
         """
-        rating = state['rating']
-        elapsed_time = time - state['time']
-
         regress = self.regression_coeff(elapsed_time)
 
-        rating = regress * rating + (1.0 - regress) * self.equilibrium_rating
+        return regress * rating + (1.0 - regress) * self.initial_rating
 
-        return {'time': time, 'rating': rating}
+    def format_record(self, record):
+        """
+        Format record as a numpy record array
 
-    def fit(self, learning_rate, commutes, iterations=3):
+        """
+        if self.nfeat == 1:
+            dtype = [('time', 'datetime64[s]'), ('rating', 'float')]
+        else:
+            dtype = [('time', 'datetime64[s]'), ('rating', 'float', self.nfeat)]
+
+        for label in record.keys():
+            record[label] = np.rec.array(record[label], dtype=dtype)
+
+        return record
+
+    def fit(self, learning_rate, commutes, iterations=3, max_residual=3.):
         """
         Primary routine that performs model calibration. It is called
         recursively by the `fit` routine.
@@ -143,77 +130,51 @@ class Elora:
                 estimate of the covariance matrix
 
         """
-        # scale values to zero mean and unit variance
-        self.scaler = StandardScaler(copy=False)
         self.scaler.fit_transform(self.values)
-
-        # set global class attributes
-        self.first_update_time = times.min()
-        self.last_update_time = times.max()
-        self.median_value = np.median(self.values, axis=0)
-        self.labels = np.union1d(labels1, labels2)
-
-        # commutative comparisons change sign under label interchange
-        self.commutes = commutes
-        sign = 1 if self.commutes else -1
         self.compare = add if commutes else sub
-        self.commutator = (
-            np.zeros_like(self.median_value)
-            if commutes else
-            self.median_value)
 
-        # initialize empty record for each label
-        self.record = {label: [] for label in self.labels}
-
-        # keep track of prior state and rating for each label
-        prior_state_dict = {}
-
-        # track prediction residuals
+        sign = 1 if commutes else -1
         residuals = np.empty_like(self.values)
-
-        # initialize covariance terms
         cov = np.array(np.cov(self.values, rowvar=False), ndmin=2)
-        prec = np.linalg.inv(cov)
+        prec = np.linalg.inv(cov + 1e-4*np.eye(self.nfeat))
 
-        # refine covariance after each iteration
         for iteration in range(iterations):
+            record = {label: [] for label in self.labels}
+            prior_state_dict = {}
 
-            # loop over all paired comparison training examples
-            for idx, (comp, value) in enumerate(
-                    zip(self.comparisons, self.values)):
+            for idx, (pair, value) in enumerate(zip(self.pairs, self.values)):
+                prior_time1, prior_rating1 = prior_state_dict.get(
+                    pair.label1, (pair.time, self.initial_rating))
+                prior_time2, prior_rating2 = prior_state_dict.get(
+                    pair.label2, (pair.time, self.initial_rating))
 
-                prior_state1 = prior_state_dict.get(
-                    comp.label1, self.initial_state(comp.time, comp.label1))
-                prior_state2 = prior_state_dict.get(
-                    comp.label2, self.initial_state(comp.time, comp.label2))
+                rating1 = self.evolve_rating(
+                    prior_rating1, pair.time - prior_time1)
+                rating2 = self.evolve_rating(
+                    prior_rating2, pair.time - prior_time2)
 
-                state1 = self.evolve_state(comp.label1, prior_state1, comp.time)
-                state2 = self.evolve_state(comp.label2, prior_state2, comp.time)
+                mean = self.compare(rating1, rating2)
+                value_pred = mean + pair.bias
+                residual = value - value_pred
+                residuals[idx] = residual
 
-                loc = self.compare(state1['rating'], state2['rating'])
-                value_pred = loc + self.commutator + comp.bias
-                residuals[idx] = value - value_pred
+                norm = min(max_residual/np.linalg.norm(residual), 1.)
+                rating_change = learning_rate * np.dot(prec, norm*residual)
+                rating1 += rating_change
+                rating2 += sign*rating_change
 
-                rating_change = learning_rate * np.dot(prec, value - value_pred)
-                state1['rating'] += rating_change
-                state2['rating'] += sign*rating_change
+                record[pair.label1].append((pair.time, rating1))
+                record[pair.label2].append((pair.time, rating2))
 
-                # record current ratings
-                for label, state in [
-                        (comp.label1, state1), (comp.label2, state2)]:
-                    self.record[label].append((state['time'], state['rating']))
-                    prior_state_dict[label] = state.copy()
+                prior_state_dict[pair.label1] = (pair.time, rating1)
+                prior_state_dict[pair.label2] = (pair.time, rating2)
 
-            # compute and return residual covariance matrix
             cov = np.array(np.cov(residuals, rowvar=False), ndmin=2)
-            prec = np.linalg.inv(cov)
-            self.scale = np.sqrt(cov.diagonal()).squeeze()
+            prec = np.linalg.inv(cov + 1e-4*np.eye(self.nfeat))
 
-        _, nfeat = self.values.shape
-        dtype = [('time', 'datetime64[s]'), ('rating', 'float', nfeat)]
-
-        for label in self.record.keys():
-            self.record[label] = np.rec.array(self.record[label], dtype=dtype)
+        self.cov = self.scaler.var_ * cov
+        self.record = self.format_record(record)
+        self.scaler.inverse_transform(self.values)
 
     def get_rating(self, times, labels):
         """
@@ -230,200 +191,74 @@ class Elora:
         """
         times = np.array(times, dtype='datetime64[s]', ndmin=1)
         labels = np.array(labels, dtype='str', ndmin=1)
+        ratings = np.empty((times.size, self.nfeat))
 
-        ratings = []
-
-        for time, label in zip(times, labels):
+        for idx, (time, label) in enumerate(zip(times, labels)):
             try:
                 label_record = self.record[label]
                 index = label_record.time.searchsorted(time)
                 prev_index = max(index - 1, 0)
                 prior_state = label_record[prev_index]
-                state = self.evolve_state(label, prior_state, time)
+                rating = self.evolve_rating(
+                    prior_state.rating, time - prior_state.time)
             except KeyError:
-                state = self.initial_state(time, label)
+                rating = self.initial_rating
 
-            ratings.append(state['rating'])
+            ratings[idx] = rating
 
-        return np.squeeze(ratings)
+        return ratings.squeeze()
 
-    def cdf(self, x, times, labels1, labels2, biases=0):
+    def pdf(self, x, time, label1, label2, bias=0):
         """
-        Computes the comulative distribution function (CDF) for each
-        comparison, i.e. prob(value < x).
-
-        Args:
-            x (array of float): threshold of comparison for each value
-            times (array of np.datetime64): comparison datetimes
-            labels1 (array of str): comparison labels for first entity
-            labels2 (array of str): comparison labels for second entity
-            values (array of float): comparison value observed outcomes
-            biases (array of float): comparison bias correct factors,
-                default value is 0
-
-        Returns:
-            y (array of float): cumulative distribution function value
-                for each input
-
-        """
-        times = np.array(times, dtype='datetime64[s]', ndmin=1)
-        labels1 = np.array(labels1, dtype='str', ndmin=1)
-        labels2 = np.array(labels2, dtype='str', ndmin=1)
-
-        if np.isscalar(biases):
-            biases = np.full_like(times, biases, dtype='float')
-        else:
-            biases = np.array(biases, dtype='float', ndmin=1)
-
-        ratings1 = self.get_rating(times, labels1)
-        ratings2 = self.get_rating(times, labels2)
-
-        loc = self.compare(ratings1, ratings2) + self.commutator + biases
-
-        return norm.cdf(x, loc=loc, scale=self.scale)
-
-    def sf(self, x, times, labels1, labels2, biases=0):
-        """
-        Computes the survival function (SF) for each
-        comparison, i.e. prob(value > x).
-
-        Args:
-            x (array of float): threshold of comparison for each value
-            times (array of np.datetime64): comparison datetimes
-            labels1 (array of str): comparison labels for first entity
-            labels2 (array of str): comparison labels for second entity
-            values (array of float): comparison value observed outcomes
-            biases (array of float): comparison bias correct factors,
-                default value is 0
-
-        Returns:
-            y (array of float): survival function value for each input
-
-        """
-        times = np.array(times, dtype='datetime64[s]', ndmin=1)
-        labels1 = np.array(labels1, dtype='str', ndmin=1)
-        labels2 = np.array(labels2, dtype='str', ndmin=1)
-
-        if np.isscalar(biases):
-            biases = np.full_like(times, biases, dtype='float')
-        else:
-            biases = np.array(biases, dtype='float', ndmin=1)
-
-        ratings1 = self.get_rating(times, labels1)
-        ratings2 = self.get_rating(times, labels2)
-
-        loc = self.compare(ratings1, ratings2) + self.commutator + biases
-
-        return np.squeeze(norm.sf(x, loc=loc, scale=self.scale))
-
-    def pdf(self, x, times, labels1, labels2, biases=0):
-        """
-        Computes the probability distribution function (PDF) for each
+        Computes the probability distribution function (PDF) of a single
         comparison, i.e. P(x).
 
         Args:
             x (array of float): input values
-            times (array of np.datetime64): comparison datetimes
-            labels1 (array of str): comparison labels for first entity
-            labels2 (array of str): comparison labels for second entity
-            values (array of float): comparison value observed outcomes
-            biases (array of float): comparison bias correct factors,
-                default value is 0
+            time (np.datetime64): comparison datetime
+            label1 (str): comparison label for first entity
+            label2 (str): comparison label for second entity
+            value (float): comparison value observed outcome
+            bias (float): comparison bias correction factor, default value is 0
 
         Returns:
             y (array of float): probability density at each input
 
         """
-        times = np.array(times, dtype='datetime64[s]', ndmin=1)
-        labels1 = np.array(labels1, dtype='str', ndmin=1)
-        labels2 = np.array(labels2, dtype='str', ndmin=1)
+        rating1 = self.get_rating(time, label1)
+        rating2 = self.get_rating(time, label2)
 
-        if np.isscalar(biases):
-            biases = np.full_like(times, biases, dtype='float')
-        else:
-            biases = np.array(biases, dtype='float', ndmin=1)
+        mean = self.compare(rating1, rating2) + bias
 
-        ratings1 = self.get_rating(times, labels1)
-        ratings2 = self.get_rating(times, labels2)
+        x = self.scaler.transform(x)
 
-        loc = self.compare(ratings1, ratings2) + self.commutator + biases
+        return multivariate_normal.pdf(x, mean=mean, cov=self.cov).squeeze()
 
-        return np.squeeze(norm.pdf(x, loc=loc, scale=self.scale))
-
-    def percentile(self, p, times, labels1, labels2, biases=0):
+    def cdf(self, x, time, label1, label2, bias=0):
         """
-        Computes percentiles p of the probability distribution.
+        Computes the cumulative distribution function (CDF) of a single
+        comparison, i.e. F(x).
 
         Args:
-            p (array of float): percentiles to evaluate (in range [0, 100])
-            times (array of np.datetime64): comparison datetimes
-            labels1 (array of str): comparison labels for first entity
-            labels2 (array of str): comparison labels for second entity
-            values (array of float): comparison value observed outcomes
-            biases (array of float): comparison bias correct factors,
-                default value is 0
+            x (array of float): input values
+            time (np.datetime64): comparison datetime
+            label1 (str): comparison label for first entity
+            label2 (str): comparison label for second entity
+            value (float): comparison value observed outcome
+            bias (float): comparison bias correction factor, default value is 0
 
         Returns:
-            x (array of float): values of the distribution corresponding to
-                each percentile
+            y (array of float): probability density at each input
 
         """
-        times = np.array(times, dtype='datetime64[s]', ndmin=1)
-        labels1 = np.array(labels1, dtype='str', ndmin=1)
-        labels2 = np.array(labels2, dtype='str', ndmin=1)
+        rating1 = self.get_rating(time, label1)
+        rating2 = self.get_rating(time, label2)
 
-        if np.isscalar(biases):
-            biases = np.full_like(times, biases, dtype='float')
-        else:
-            biases = np.array(biases, dtype='float', ndmin=1)
+        mean = self.compare(rating1, rating2) + bias
 
-        ratings1 = self.get_rating(times, labels1)
-        ratings2 = self.get_rating(times, labels2)
+        x = self.scaler.transform(x)
 
-        loc = self.compare(ratings1, ratings2) + self.commutator + biases
-
-        p = np.true_divide(p, 100.0)
-
-        if np.count_nonzero(p < 0.0) or np.count_nonzero(p > 1.0):
-            raise ValueError("percentiles must be in the range [0, 100]")
-
-        return np.squeeze(norm.ppf(p, loc=loc, scale=self.scale))
-
-    def quantile(self, q, times, labels1, labels2, biases=0):
-        """
-        Computes quantiles q of the probability distribution.
-        Same as percentiles but accepts values [0, 1].
-
-        Args:
-            q (array of float): quantiles to evaluate (in range [0, 1])
-            times (array of np.datetime64): comparison datetimes
-            labels1 (array of str): comparison labels for first entity
-            labels2 (array of str): comparison labels for second entity
-            values (array of float): comparison value observed outcomes
-            biases (array of float): comparison bias correct factors,
-                default value is 0
-
-        Returns:
-            x (array of float): values of the distribution corresponding to
-                each quantile
-
-        """
-        times = np.array(times, dtype='datetime64[s]', ndmin=1)
-        labels1 = np.array(labels1, dtype='str', ndmin=1)
-        labels2 = np.array(labels2, dtype='str', ndmin=1)
-
-        if np.isscalar(biases):
-            biases = np.full_like(times, biases, dtype='float')
-        else:
-            biases = np.array(biases, dtype='float', ndmin=1)
-
-        ratings1 = self.get_rating(times, labels1)
-        ratings2 = self.get_rating(times, labels2)
-
-        loc = self.compare(ratings1, ratings2) + self.commutator + biases
-
-        return np.squeeze(
-            norm.ppf(q, loc=loc[:, np.newaxis], scale=self.scale))
+        return multivariate_normal.cdf(x, mean=mean, cov=self.cov).squeeze()
 
     def mean(self, times, labels1, labels2, biases=0):
         """
@@ -444,64 +279,50 @@ class Elora:
         times = np.array(times, dtype='datetime64[s]', ndmin=1)
         labels1 = np.array(labels1, dtype='str', ndmin=1)
         labels2 = np.array(labels2, dtype='str', ndmin=1)
-
-        if np.isscalar(biases):
-            biases = np.full_like(times, biases, dtype='float')
-        else:
-            biases = np.array(biases, dtype='float', ndmin=1)
+        biases = np.array(biases, dtype='float').reshape(times.size, 1)
 
         ratings1 = self.get_rating(times, labels1)
         ratings2 = self.get_rating(times, labels2)
 
-        loc = self.compare(ratings1, ratings2) + self.commutator + biases
+        mean = self.compare(ratings1, ratings2)
+        biases = biases * np.ones_like(mean)
 
-        return np.squeeze(loc)
+        mean = self.scaler.inverse_transform(mean + biases)
 
-    def residuals(self, y_true=None, standardize=False):
+        return np.squeeze(mean)
+
+    def residuals(self, y_true=None):
         """
         Computes residuals of the model predictions for each training example
 
         Args:
-            standardize (bool): if True, the residuals are standardized to unit
-                variance
+            y_true(array of float, optional): reference values used to compute
+                the residuals. default is to use to training values.
 
         Returns:
             residuals (array of float): residuals for each example
 
         """
         y_pred = self.mean(
-            self.examples.time,
-            self.examples.label1,
-            self.examples.label2,
-            self.examples.bias)
+            self.pairs.time,
+            self.pairs.label1,
+            self.pairs.label2,
+            self.pairs.bias)
 
         if y_true is None:
-            y_true = self.examples.value
+            y_true = self.values
 
         residuals = y_true - y_pred
 
-        if standardize is True:
-
-            quantiles = [.159, .841]
-
-            qlo, qhi = self.quantile(
-                quantiles,
-                self.examples.time,
-                self.examples.label1,
-                self.examples.label2,
-                self.examples.bias
-            ).T
-
-            residuals /= .5*abs(qhi - qlo)
-
         return residuals
 
-    def rank(self, time, column_index=0):
+    def ratings(self, time, order_by=None):
         """
         Ranks labels by comparing mean of each label to the average label.
 
         Args:
-            time (np.datetime64): time at which the ranking should be computed.
+            time (np.datetime64): time at which the ranking should be computed
+            order_by (int, optional): feature value index to rank by
 
         Returns:
             label rankings (list of tuples): returns a rank sorted list of
@@ -509,24 +330,29 @@ class Elora:
                 the specified summary statistic.
 
         """
-        ranked_list = [
-            (label, self.get_rating(time, label)[column_index])
+        label_ratings = [
+            (label, self.get_rating(time, label))
             for label in self.labels]
 
-        return sorted(ranked_list, key=lambda v: v[1], reverse=True)
+        if (order_by is not None) and (self.nfeat == 1):
+            return sorted(
+                label_ratings, key=lambda v: v[1], reverse=True)
+        elif (order_by is not None):
+            return sorted(
+                label_ratings, key=lambda v: v[1][order_by], reverse=True)
+        else:
+            return label_ratings
 
-    def sample(self, times, labels1, labels2, biases=0, size=1):
+    def sample(self, time, label1, label2, bias=0, size=1):
         """
-        Draw random samples from the predicted comparison probability
+        Draw random samples from the predicted multivariate-normal probability
         distribution.
 
         Args:
-            times (array_like of np.datetime64): list of datetimes.
-            labels1 (array_like of string): list of first entity labels.
-            labels2 (array_like of string): list of second entity labels.
-            biases (array_like of float, optional): single bias number or
-                list of bias numbers which match the comparison inputs.
-                Default is 0, in which case no bias is used.
+            time (np.datetime64): datetime of the comparison
+            label1 (string): name of the first label
+            label2 (string): name of the second label
+            bias (float, optional): bias coefficient of the comparison
             size (int, optional): number of samples to be drawn.
                 default is 1, in which case a single value is returned.
 
@@ -534,23 +360,14 @@ class Elora:
             x (array of float): random samples for the comparison outcome
 
         """
-        times = np.array(times, dtype='datetime64[s]', ndmin=1)
-        labels1 = np.array(labels1, dtype='str', ndmin=1)
-        labels2 = np.array(labels2, dtype='str', ndmin=1)
-        ratings1 = self.get_rating(times, labels1)
-        ratings2 = self.get_rating(times, labels2)
+        rating1 = self.get_rating(time, label1)
+        rating2 = self.get_rating(time, label2)
 
-        if np.isscalar(biases):
-            biases = np.full_like(times, biases, dtype='float')
-        else:
-            biases = np.array(biases, dtype='float', ndmin=1)
+        mean = self.compare(rating1, rating2) + bias
 
-        if size < 1 or not isinstance(size, int):
-            raise ValueError("sample size must be a positive integer")
+        mean = self.scaler.inverse_transform(mean)
 
-        loc = self.compare(ratings1, ratings2) + self.commutator + biases
-
-        return norm.rvs(loc=loc, scale=self.scale, size=size)
+        return multivariate_normal.rvs(mean, self.cov, size=size).squeeze()
 
 
 if __name__ == '__main__':
@@ -575,28 +392,24 @@ if __name__ == '__main__':
     home_stats = feat.filter(regex='^home.*', axis=1)
     home_stats.columns = home_stats.columns.str.replace('home_', '')
     stats = away_stats - home_stats
-
-    # stats = stats[['points']]
-    stats = stats[['points', 'pass_yards', 'rush_yards']]
-    #stats = stats[['points', 'pass_attempts', 'pass_yards', 'rush_attempts',
-    #               'rush_yards', 'third_down_conversions', 'pass_completions',
-    #               'yards_from_penalties', 'penalties']]
+    #stats = stats[['points']]
+    stats = stats[['points', 'pass_yards', 'pass_attempts', 'rush_yards',
+                   'rush_attempts', 'yards_from_penalties']]
 
     # initialize the estimator
     nfl_spreads = Elora(comp.datetime, comp.team_away, comp.team_home, stats)
-    print(nfl_spreads.labels)
 
     # fit the estimator to the training data
-    nfl_spreads.fit(.1, False, iterations=3)
+    nfl_spreads.fit(.08, False, iterations=3)
 
     # specify a comparison time
     last_time = nfl_spreads.last_update_time
 
     # predict the mean outcome at that time
-    mean = nfl_spreads.mean(last_time, 'RAV', 'PIT')
-    print('RAV @PIT: {}'.format(mean))
+    away = 'CLE'
+    home = 'KAN'
+    mean = nfl_spreads.mean(last_time, away, home, biases=0)
+    print(f'{away} @{home}: {mean}')
 
-    # rank nfl teams at end of 2018 regular season
-    rankings = nfl_spreads.rank(last_time)
-    for team, rank in rankings:
-        print('{}: {}'.format(team, rank))
+    for label, rating in nfl_spreads.ratings(last_time, order_by=0):
+        print(label, rating)
