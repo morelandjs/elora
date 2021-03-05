@@ -37,16 +37,17 @@ class Elora:
         labels1 = np.array(labels1, dtype='str', ndmin=1)
         labels2 = np.array(labels2, dtype='str', ndmin=1)
         values = np.array(values, dtype='float').reshape(times.size, -1)
-        biases = biases * np.ones(times.shape)
+        biases = (
+            np.array(biases, dtype='float', ndmin=1) * np.ones(times.size)
+        ).reshape(times.size, -1)
 
         pairs = np.rec.fromarrays(
-            [times, labels1, labels2, biases],
-            names=('time', 'label1', 'label2', 'bias'))
+            [times, labels1, labels2], names=('time', 'label1', 'label2'))
 
         indices = np.argsort(pairs, order=['time', 'label1', 'label2'])
         self.pairs = pairs[indices]
         self.values = values[indices]
-        self.nfeat = values.shape[1]
+        self.biases = biases[indices]
 
         # used to scale values to zero mean and unit variance
         self.scaler = StandardScaler(copy=False)
@@ -68,7 +69,7 @@ class Elora:
         if the labels commute, otherwise 0.
 
         """
-        return np.zeros(self.nfeat)
+        return np.zeros(self.values.shape[1])
 
     def regression_coeff(self, elapsed_time):
         """
@@ -106,10 +107,11 @@ class Elora:
         Format record as a numpy record array
 
         """
-        if self.nfeat == 1:
-            dtype = [('time', 'datetime64[s]'), ('rating', 'float')]
-        else:
-            dtype = [('time', 'datetime64[s]'), ('rating', 'float', self.nfeat)]
+        nfeat = self.values.shape[1]
+
+        dtype = [
+            ('time', 'datetime64[s]'),
+            ('rating', 'float', nfeat) if nfeat > 1 else ('rating', 'float')]
 
         for label in record.keys():
             record[label] = np.rec.array(record[label], dtype=dtype)
@@ -136,13 +138,15 @@ class Elora:
         sign = 1 if commutes else -1
         residuals = np.empty_like(self.values)
         cov = np.array(np.cov(self.values, rowvar=False), ndmin=2)
-        prec = np.linalg.inv(cov + 1e-4*np.eye(self.nfeat))
+        prec = np.linalg.inv(cov + 1e-4*np.eye(self.values.shape[1]))
 
         for iteration in range(iterations):
             record = {label: [] for label in self.labels}
             prior_state_dict = {}
 
-            for idx, (pair, value) in enumerate(zip(self.pairs, self.values)):
+            for idx, (pair, value, bias) in enumerate(
+                    zip(self.pairs, self.values, self.biases)):
+
                 prior_time1, prior_rating1 = prior_state_dict.get(
                     pair.label1, (pair.time, self.initial_rating))
                 prior_time2, prior_rating2 = prior_state_dict.get(
@@ -154,7 +158,7 @@ class Elora:
                     prior_rating2, pair.time - prior_time2)
 
                 mean = self.compare(rating1, rating2)
-                value_pred = mean + pair.bias
+                value_pred = mean + bias
                 residual = value - value_pred
                 residuals[idx] = residual
 
@@ -170,7 +174,7 @@ class Elora:
                 prior_state_dict[pair.label2] = (pair.time, rating2)
 
             cov = np.array(np.cov(residuals, rowvar=False), ndmin=2)
-            prec = np.linalg.inv(cov + 1e-4*np.eye(self.nfeat))
+            prec = np.linalg.inv(cov + 1e-4*np.eye(self.values.shape[1]))
 
         self.cov = self.scaler.var_ * cov
         self.record = self.format_record(record)
@@ -191,7 +195,7 @@ class Elora:
         """
         times = np.array(times, dtype='datetime64[s]', ndmin=1)
         labels = np.array(labels, dtype='str', ndmin=1)
-        ratings = np.empty((times.size, self.nfeat))
+        ratings = np.empty((times.size, self.values.shape[1]))
 
         for idx, (time, label) in enumerate(zip(times, labels)):
             try:
@@ -206,7 +210,7 @@ class Elora:
 
             ratings[idx] = rating
 
-        return ratings.squeeze()
+        return ratings
 
     def pdf(self, x, time, label1, label2, bias=0):
         """
@@ -228,9 +232,8 @@ class Elora:
         rating1 = self.get_rating(time, label1)
         rating2 = self.get_rating(time, label2)
 
-        mean = self.compare(rating1, rating2) + bias
-
-        x = self.scaler.transform(x)
+        mean = self.scaler.inverse_transform(
+            self.compare(rating1, rating2) + bias)
 
         return multivariate_normal.pdf(x, mean=mean, cov=self.cov).squeeze()
 
@@ -254,9 +257,8 @@ class Elora:
         rating1 = self.get_rating(time, label1)
         rating2 = self.get_rating(time, label2)
 
-        mean = self.compare(rating1, rating2) + bias
-
-        x = self.scaler.transform(x)
+        mean = self.scaler.inverse_transform(
+            self.compare(rating1, rating2) + bias)
 
         return multivariate_normal.cdf(x, mean=mean, cov=self.cov).squeeze()
 
@@ -279,15 +281,13 @@ class Elora:
         times = np.array(times, dtype='datetime64[s]', ndmin=1)
         labels1 = np.array(labels1, dtype='str', ndmin=1)
         labels2 = np.array(labels2, dtype='str', ndmin=1)
-        biases = np.array(biases, dtype='float').reshape(times.size, 1)
+        biases = np.array(biases, dtype='float', ndmin=1)
 
         ratings1 = self.get_rating(times, labels1)
         ratings2 = self.get_rating(times, labels2)
 
-        mean = self.compare(ratings1, ratings2)
-        biases = biases * np.ones_like(mean)
-
-        mean = self.scaler.inverse_transform(mean + biases)
+        mean = self.scaler.inverse_transform(
+            self.compare(ratings1, ratings2) + biases)
 
         return np.squeeze(mean)
 
@@ -307,14 +307,14 @@ class Elora:
             self.pairs.time,
             self.pairs.label1,
             self.pairs.label2,
-            self.pairs.bias)
+            self.biases)
 
         if y_true is None:
             y_true = self.values
 
         residuals = y_true - y_pred
 
-        return residuals
+        return np.squeeze(residuals)
 
     def ratings(self, time, order_by=None):
         """
@@ -331,10 +331,10 @@ class Elora:
 
         """
         label_ratings = [
-            (label, self.get_rating(time, label))
+            (label, self.get_rating(time, label).squeeze())
             for label in self.labels]
 
-        if (order_by is not None) and (self.nfeat == 1):
+        if (order_by is not None) and (self.values.shape[1] == 1):
             return sorted(
                 label_ratings, key=lambda v: v[1], reverse=True)
         elif (order_by is not None):
@@ -392,9 +392,9 @@ if __name__ == '__main__':
     home_stats = feat.filter(regex='^home.*', axis=1)
     home_stats.columns = home_stats.columns.str.replace('home_', '')
     stats = away_stats - home_stats
-    #stats = stats[['points']]
-    stats = stats[['points', 'pass_yards', 'pass_attempts', 'rush_yards',
-                   'rush_attempts', 'yards_from_penalties']]
+    stats = stats[['points']]
+    #stats = stats[['points', 'pass_yards', 'pass_attempts', 'rush_yards',
+    #               'rush_attempts', 'yards_from_penalties']]
 
     # initialize the estimator
     nfl_spreads = Elora(comp.datetime, comp.team_away, comp.team_home, stats)
