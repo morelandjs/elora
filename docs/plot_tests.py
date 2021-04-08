@@ -147,7 +147,7 @@ class League:
         self.labels2 = locs2.astype(str)
 
 
-league = League(10**5)
+league = League(10**6)
 
 
 @plot
@@ -165,7 +165,7 @@ def quickstart_example(scale=1, size=100):
 
     # train the model on the list of comparisons
     elora = Elora(times, labels1, labels2, spreads)
-    elora.fit(.005, False)
+    elora.fit(.05, False)
 
     # predicted and true (analytic) comparison values
     pred_times = np.repeat(elora.last_update_time, times.size)
@@ -190,12 +190,13 @@ def validate_spreads():
 
     # train margin-dependent Elo model
     lines = np.arange(-49.5, 50.5)
+
     elora = Elora(league.times, league.labels1, league.labels2, league.spreads)
-    elora.fit(1e-4, False)
+    elora.fit(1e-4, False, scale=np.sqrt(2*league.scale**2))
 
     # exact prior distribution
-    cdf = norm.cdf(lines, loc=np.mean(league.spreads), scale=np.sqrt(2*10**2))
-    ax_prior.plot(lines, cdf, color='k')
+    sf = norm.sf(lines, loc=elora.median_value, scale=np.sqrt(2*10**2))
+    ax_prior.plot(lines, sf, color='k')
 
     # label names
     label1 = str(league.loc1)
@@ -203,27 +204,27 @@ def validate_spreads():
 
     plot_args = [
         (ax_prior, elora.first_update_time, 'prior'),
-        (ax2_post, elora.last_update_time, 'posterior')]
+        (ax2_post, elora.last_update_time, 'posterior'),
+    ]
 
     for ax, time, title in plot_args:
         for n, label2 in enumerate(label2_list):
 
-            cdf = elora.cdf(lines, time, label1, label2)
+            sf = elora.sf(lines, time, label1, label2)
             label = r'$\mu_2={}$'.format(label2)
 
             if ax.is_first_row():
-                ax.plot(lines[n::6], cdf[n::6], 'o', zorder=2, label=label)
+                ax.plot(lines[n::6], sf[n::6], 'o', zorder=2, label=label)
 
             if ax.is_last_row():
-                ax.plot(lines, cdf, 'o', zorder=2, label=label)
+                ax.plot(lines, sf, 'o', zorder=2, label=label)
 
-                cdf = norm.cdf(
-                    lines, loc=int(label1) - int(label2),
-                    scale=np.sqrt(2*league.scale**2))
-                ax.plot(lines, cdf, color='k')
+                sf = norm.sf(lines, loc=int(label1) - int(label2),
+                             scale=np.sqrt(2*league.scale**2))
+                ax.plot(lines, sf, color='k')
 
             leg = ax.legend(title=r'$\mu_1 = {}$'.format(label1),
-                            handletextpad=.2, loc=4)
+                            handletextpad=.2, loc=1)
             leg._legend_box.align = 'right'
 
             lines = np.floor(lines)
@@ -235,7 +236,7 @@ def validate_spreads():
 
             ax.set_ylabel('probability to cover line')
 
-            ax.annotate(title, xy=(.05, .90),
+            ax.annotate(title, xy=(.05, .05),
                         xycoords='axes fraction', fontsize=24)
 
     set_tight(h_pad=1)
@@ -253,11 +254,11 @@ def validate_totals():
     # train margin-dependent Elo model
     lines = np.arange(149.5, 250.5)
     elora = Elora(league.times, league.labels1, league.labels2, league.totals)
-    elora.fit(1e-4, True)
+    elora.fit(1e-4, True, scale=np.sqrt(2*league.scale**2))
 
     # exact prior distribution
-    cdf = norm.cdf(lines, loc=np.mean(league.totals), scale=np.sqrt(2*10**2))
-    ax_prior.plot(lines, cdf, color='k')
+    sf = norm.sf(lines, loc=elora.median_value, scale=np.sqrt(2*10**2))
+    ax_prior.plot(lines, sf, color='k')
 
     # label names
     label1 = str(league.loc1)
@@ -265,27 +266,27 @@ def validate_totals():
 
     plot_args = [
         (ax_prior, elora.first_update_time, 'prior'),
-        (ax2_post, elora.last_update_time, 'posterior')]
+        (ax2_post, elora.last_update_time, 'posterior'),
+    ]
 
     for ax, time, title in plot_args:
         for n, label2 in enumerate(label2_list):
 
-            cdf = elora.cdf(lines, time, label1, label2)
+            sf = elora.sf(lines, time, label1, label2)
             label = r'$\mu_2={}$'.format(label2)
 
             if ax.is_first_row():
-                ax.plot(lines[n::6], cdf[n::6], 'o', zorder=2, label=label)
+                ax.plot(lines[n::6], sf[n::6], 'o', zorder=2, label=label)
 
             if ax.is_last_row():
-                ax.plot(lines, cdf, 'o', zorder=2, label=label)
+                ax.plot(lines, sf, 'o', zorder=2, label=label)
 
-                cdf = norm.cdf(
-                    lines, loc=int(label1) + int(label2),
-                    scale=np.sqrt(2*league.scale**2))
-                ax.plot(lines, cdf, color='k')
+                sf = norm.sf(lines, loc=int(label1) + int(label2),
+                             scale=np.sqrt(2*league.scale**2))
+                ax.plot(lines, sf, color='k')
 
             leg = ax.legend(title=r'$\mu_1 = {}$'.format(label1),
-                            handletextpad=.2, loc=4)
+                            handletextpad=.2, loc=1)
             leg._legend_box.align = 'right'
 
             lines = np.floor(lines)
@@ -297,7 +298,7 @@ def validate_totals():
 
             ax.set_ylabel('probability to cover line')
 
-            ax.annotate(title, xy=(.05, .90),
+            ax.annotate(title, xy=(.05, .05),
                         xycoords='axes fraction', fontsize=24)
 
     set_tight(h_pad=1)
@@ -318,21 +319,24 @@ def convergence():
     # point spread and point total subplots
     subplots = [
         (False, 0, league.spreads, 'probability spread > 0'),
-        (True, 200, league.totals, 'probability total > 200')]
+        (True, 200, league.totals, 'probability total > 200'),
+    ]
 
     for ax, (commutes, line, values, ylabel) in zip(axes, subplots):
 
         # train margin-dependent Elo model
         elora = Elora(league.times, league.labels1, league.labels2, values)
-        elora.fit(1e-3, commutes)
+        elora.fit(1e-4, commutes, scale=np.sqrt(2*league.scale**2))
 
         for label2 in label2_list:
 
             # evaluation times and labels
             times = np.arange(league.times.size)[::1000]
+            labels1 = times.size * [label1]
+            labels2 = times.size * [label2]
 
             # observed win probability
-            prob = [elora.cdf(line, time, label1, label2) for time in times]
+            prob = elora.sf(line, times, labels1, labels2)
             ax.plot(times, prob)
 
             # true (analytic) win probability
