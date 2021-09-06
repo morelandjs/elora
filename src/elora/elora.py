@@ -92,7 +92,7 @@ class Elora:
     def evolve_rating(self, rating, elapsed_time):
         """
         Evolves 'state' to 'time', applying rating regression if necessary,
-        anf returns the evolved rating.
+        and returns the evolved rating.
 
         Args:
             state (dict): state dictionary {'time': time, 'rating': rating}
@@ -157,7 +157,12 @@ class Elora:
 
         self.record = record
 
-        return self.examples.value - self.examples.value_pred
+        residuals = np.rec.fromarrays([
+            self.examples.time,
+            self.examples.value - self.examples.value_pred
+        ], names=('time', 'residual'))
+
+        return residuals
 
     def get_rating(self, times, labels):
         """
