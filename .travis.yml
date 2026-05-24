@@ -15,7 +15,6 @@ install:
   - pip install numpy scipy>=0.18.0 sphinx sphinx_rtd_theme
   - pip install --verbose --editable .
 script:
-  - python3 setup.py tests
-  - python3 setup.py docs
+  - pytest tests
 after_success:
   - bash docs/deploy_script.sh
