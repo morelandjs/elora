@@ -57,8 +57,8 @@ def test_equilibrium_rating():
     Check that ratings regress to equilibrium rating
 
     """
-    init_rating = np.float(np.random.uniform(-10, 10, 1))
-    equilibrium_rating = np.float(np.random.uniform(-10, 10, 1))
+    init_rating = float(np.random.uniform(-10, 10, 1))
+    equilibrium_rating = float(np.random.uniform(-10, 10, 1))
 
     class EloraTest(Elora):
 
